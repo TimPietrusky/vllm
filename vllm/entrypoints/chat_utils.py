@@ -1195,123 +1195,34 @@ def apply_hf_chat_template(
             "does not define one."
         )
 
-    # Skip adding the final assistant message if:
-    # 1. We don't want to add the generation prompt, or
-    # 2. The final message is already from the assistant role and we don't
-    #    want to continue it.
-    conv_for_formatting = list(conversation)
+    # Append an empty assistant message to ensure that the model
+    # receives a clear turn-taking signal, which is especially
+    # important for tool calls in long contexts
     if kwargs.get("add_generation_prompt", True):
         if (
             kwargs.get("continue_final_message", False)
-            and conv_for_formatting
-            and conv_for_formatting[-1]["role"] == "assistant"
+            and conversation
+            and conversation[-1]["role"] == "assistant"
         ):
-            # not appending a new assistant message
             pass
         else:
-            conv_for_formatting.append({"role": "assistant", "content": ""})
-    elif conv_for_formatting and conv_for_formatting[-1]["role"] == "assistant":
-        conv_for_formatting.pop()
+            conversation.append({"role": "assistant", "content": ""})
 
-    # This converts the conversation to a list of dictionaries with
-    # "role" and "content" keys.
-    converted_converstion = [_convert_message(msg) for msg in conv_for_formatting]
-    if tools:
-        kwargs["tools"] = tools
-
-    # If there's a custom template provided, use it instead
-    # of the one in the tokenizer.
-    if chat_template is not None:
-        if not hasattr(tokenizer, "_apply_chat_template"):
-            logger.warning("Tokenizer doesn't have _apply_chat_template method")
-            raise ValueError(
-                "The given tokenizer doesn't have the _apply_chat_template"
-                " method.  Please upgrade to transformers >= 4.37.0"
-            )
-        template = Template(chat_template)
-        prompt = tokenizer._apply_chat_template(
-            converted_converstion,
-            tokenize=False,
-            chat_template=template,
-            do_strip_eos_token=True,
-            **kwargs,
-        )
-    else:
-        # Adapt for some tokenizers that don't have the latest
-        # _apply_chat_template implementation.
-        # Feel free to add other tokenizers that have the issue.
-        if isinstance(tokenizer, MistralTokenizer) and not hasattr(
-            tokenizer, "_apply_chat_template"
-        ):
-            # MistralTokenizer's apply_chat_template doesn't accept tools
-            # argument
-            kwargs = {}
-            if tools is not None and kwargs.get("documents") is not None:
-                logger.warning(
-                    "Both tools and documents are not None, "
-                    "but MistralTokenizer doesn't support them correctly."
-                )
-            elif tools is not None:
-                if hasattr(tokenizer, "format_tools"):
-                    kwargs["tools"] = tools
-                else:
-                    # This happens for MistralAI-hosted models, where the
-                    # tokenizer doesn't actually have the format_tools method.
-                    # In such case, apply_mistral_chat_template handles it
-                    # correctly.
-                    return apply_mistral_chat_template(
-                        tokenizer,
-                        messages=conv_for_formatting,
-                        tools=tools,
-                        add_generation_prompt=kwargs.get("add_generation_prompt", True),
-                        continue_final_message=kwargs.get(
-                            "continue_final_message", False
-                        ),
-                        documents=kwargs.get("documents"),
-                    )
-            elif kwargs.get("documents") is not None:
-                return apply_mistral_chat_template(
-                    tokenizer,
-                    messages=conv_for_formatting,
-                    tools=tools,
-                    add_generation_prompt=kwargs.get("add_generation_prompt", True),
-                    continue_final_message=kwargs.get("continue_final_message", False),
-                    documents=kwargs.get("documents"),
-                )
-
-            prompt = tokenizer.apply_chat_template(
-                converted_converstion,
-                tokenize=False,
-                **kwargs,
-            )
-        else:
-            # Fixed the bug where add_generation_prompt was passed both as an explicit parameter
-            # and through **kwargs, causing "got multiple values for keyword argument" error
-            prompt = tokenizer.apply_chat_template(
-                converted_converstion,
-                tokenize=False,
-                **kwargs,
-            )
-
-    # For Llama 3 with JSON mode, we need to add a prefix to make sure
-    # it formats the JSON output correctly.
-    if (
-        tools is not None
-        and tools
-        and isinstance(tokenizer, LlamaTokenizerFast)
-        and trust_remote_code
+    # Remove empty assistant message as there should not be a turn-taking signal
+    elif (
+        conversation
+        and conversation[-1]["role"] == "assistant"
+        and not conversation[-1].get("content")
     ):
-        # Only needs to enable for tool mode for now.
-        # TODO(vllm-team): We should make this more robust in the future.
-        if (
-            tokenizer.prefix_allowed_tokens_fn is not None
-            and hasattr(tokenizer, "name_or_path")
-            and "llama" in tokenizer.name_or_path
-            and "3" in tokenizer.name_or_path
-        ):
-            prompt = f"{prompt}<|prefix|>assistant\n\n"
+        conversation.pop()
 
-    return prompt
+    return tokenizer.apply_chat_template(
+        conversation=conversation,  # type: ignore[arg-type]
+        tools=tools,  # type: ignore[arg-type]
+        chat_template=hf_chat_template,
+        tokenize=tokenize,
+        **kwargs,
+    )
 
 
 def apply_mistral_chat_template(
@@ -1341,24 +1252,3 @@ def apply_mistral_chat_template(
         tools=tools,
         **kwargs,
     )
-
-
-def _convert_message(msg: ConversationMessage) -> dict:
-    """Convert a ConversationMessage to a format suitable for the tokenizer's chat template."""
-    result = {"role": msg["role"]}
-
-    if "content" in msg:
-        result["content"] = msg["content"]
-    else:
-        result["content"] = ""
-
-    if "name" in msg:
-        result["name"] = msg["name"]
-
-    if "tool_calls" in msg:
-        result["tool_calls"] = msg["tool_calls"]
-
-    if "tool_call_id" in msg:
-        result["tool_call_id"] = msg["tool_call_id"]
-
-    return result
